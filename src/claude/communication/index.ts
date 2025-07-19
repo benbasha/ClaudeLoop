@@ -125,23 +125,75 @@ export async function sendMessageToClaudeProcess(message: MessageItem, retryCoun
     }
 
     try {
-        debugLog(`📝 Sending message to Claude process: "${message.text}"`);
+        // Log message details for debugging
+        const messagePreview = message.text.length > 100 
+            ? message.text.substring(0, 100) + '...' 
+            : message.text;
+        const hasNewlines = message.text.includes('\n');
+        const lineCount = message.text.split('\n').length;
+        
+        debugLog(`📝 Sending message to Claude process:`);
+        debugLog(`   Preview: "${messagePreview}"`);
+        debugLog(`   Length: ${message.text.length} chars`);
+        debugLog(`   Has newlines: ${hasNewlines} (${lineCount} lines)`);
         
         if (claudeProcess.stdin.destroyed || !claudeProcess.stdin.writable) {
             throw new Error('Claude process stdin is not writable');
         }
         
-        claudeProcess.stdin.write(message.text);
+        // Calculate message size and chunks
+        const messageBytes = Buffer.byteLength(message.text, 'utf8');
+        const chunks = Math.ceil(messageBytes / 1024);
+        debugLog(`📝 Message size: ${messageBytes} bytes (${chunks} chunks)`);
         
+        // Send message in chunks to prevent \r from being included in the same PTY read
+        const CHUNK_SIZE = 1024;
+        const messageBuffer = Buffer.from(message.text, 'utf8');
+        
+        for (let i = 0; i < messageBuffer.length; i += CHUNK_SIZE) {
+            const chunk = messageBuffer.subarray(i, Math.min(i + CHUNK_SIZE, messageBuffer.length));
+            
+            await new Promise<void>((resolve, reject) => {
+                if (!claudeProcess || !claudeProcess.stdin) {
+                    reject(new Error('Claude process not available'));
+                    return;
+                }
+                claudeProcess.stdin.write(chunk, (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                });
+            });
+            
+            // Wait for chunk to be processed by PTY
+            await new Promise(resolve => setTimeout(resolve, 200));
+        }
+        
+        debugLog(`📝 Message sent in ${chunks} chunks`);
+        
+        // Extra wait to ensure last chunk is fully processed
         await new Promise(resolve => setTimeout(resolve, 300));
         
         debugLog(`📝 Sending carriage return to submit message...`);
         
-        if (claudeProcess.stdin.destroyed || !claudeProcess.stdin.writable) {
+        if (!claudeProcess || !claudeProcess.stdin) {
             throw new Error('Claude process stdin became unavailable');
         }
         
-        claudeProcess.stdin.write('\r');
+        if (claudeProcess.stdin.destroyed || !claudeProcess.stdin.writable) {
+            throw new Error('Claude process stdin is not writable');
+        }
+        
+        // Send carriage return as a completely separate operation
+        await new Promise<void>((resolve, reject) => {
+            if (!claudeProcess || !claudeProcess.stdin) {
+                reject(new Error('Claude process not available'));
+                return;
+            }
+            claudeProcess.stdin.write('\r', (err) => {
+                if (err) reject(err);
+                else resolve();
+            });
+        });
         
         debugLog(`✓ Message sent to Claude process successfully`);
         
